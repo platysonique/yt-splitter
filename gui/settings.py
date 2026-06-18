@@ -62,13 +62,6 @@ def _settings() -> dict:
     return migrated
 
 
-def _valid_dir(path: str) -> str | None:
-    cleaned = path.strip()
-    if cleaned and Path(cleaned).is_dir():
-        return cleaned
-    return None
-
-
 def get_download_mode() -> str:
     mode = _settings().get("download_mode", "album")
     return mode if mode in DOWNLOAD_MODES else "album"
@@ -86,9 +79,9 @@ def get_output_dir_for_mode(mode: str) -> str:
     if mode not in DOWNLOAD_MODES:
         mode = "album"
     key = f"{mode}_output_dir"
-    saved = _valid_dir(str(_settings().get(key, "")))
+    saved = str(_settings().get(key, "")).strip()
     if saved:
-        return saved
+        return str(Path(saved).expanduser())
     return DEFAULT_OUTPUT_DIR
 
 

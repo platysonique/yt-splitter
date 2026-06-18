@@ -5,8 +5,10 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
@@ -53,15 +55,93 @@ def cache_dir(video_id: str) -> Path:
     return Path(base) / "yt-splitter" / video_id
 
 
+def find_node_binary() -> str | None:
+    node = shutil.which("node")
+    if node:
+        return node
+
+    nvm_versions = Path.home() / ".nvm" / "versions" / "node"
+    if nvm_versions.is_dir():
+        for version_dir in sorted(nvm_versions.iterdir(), reverse=True):
+            candidate = version_dir / "bin" / "node"
+            if candidate.is_file():
+                return str(candidate)
+
+    for candidate in (Path("/usr/local/bin/node"), Path("/usr/bin/node")):
+        if candidate.is_file():
+            return str(candidate)
+    return None
+
+
 def downloader_env() -> dict[str, str]:
     env = os.environ.copy()
-    env["PATH"] = f"{BIN_DIR}{os.pathsep}{env.get('PATH', '')}"
+    path_parts = [str(BIN_DIR)]
+    node = find_node_binary()
+    if node:
+        path_parts.append(str(Path(node).parent))
+    existing = env.get("PATH", "")
+    if existing:
+        path_parts.append(existing)
+    env["PATH"] = os.pathsep.join(path_parts)
     return env
 
 
 def log_line(message: str, emit=print) -> None:
     if message:
         emit(message)
+
+
+def resolve_output_dir(path: str | Path) -> Path:
+    return Path(path).expanduser().resolve()
+
+
+def yt_dlp_extra_args() -> list[str]:
+    args = ["--remote-components", "ejs:github"]
+    node = find_node_binary()
+    if node:
+        args.extend(["--js-runtimes", f"node:{node}"])
+    return args
+
+
+def last_yt_dlp_error(lines: list[str]) -> str:
+    for line in reversed(lines):
+        if "ERROR:" in line:
+            return line.partition("ERROR:")[2].strip() or line.strip()
+    return "Download failed. Check the log for details."
+
+
+def run_yt_dlp(
+    command_tail: list[str],
+    emit=print,
+    *,
+    cwd: Path | None = None,
+) -> tuple[int, list[str]]:
+    command = ["youtube-dl", *yt_dlp_extra_args(), *command_tail]
+    process = subprocess.Popen(
+        command,
+        cwd=str(cwd) if cwd is not None else None,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        env=downloader_env(),
+    )
+    lines: list[str] = []
+    assert process.stdout is not None
+    for line in process.stdout:
+        cleaned = line.rstrip("\n")
+        lines.append(cleaned)
+        log_line(cleaned, emit)
+    return process.wait(), lines
+
+
+def newest_mp3(directory: Path, *, since: float | None = None) -> Path | None:
+    mp3s = [
+        path
+        for path in directory.glob("*.mp3")
+        if since is None or path.stat().st_mtime >= since
+    ]
+    mp3s.sort(key=lambda path: path.stat().st_mtime)
+    return mp3s[-1] if mp3s else None
 
 
 def download_audio(video_id: str, work_dir: Path, emit=print) -> None:
@@ -73,9 +153,8 @@ def download_audio(video_id: str, work_dir: Path, emit=print) -> None:
         return
 
     log_line("Downloading and converting audio file from YouTube...", emit)
-    process = subprocess.Popen(
+    code, lines = run_yt_dlp(
         [
-            "youtube-dl",
             "--write-info-json",
             "--write-thumbnail",
             "--embed-metadata",
@@ -86,18 +165,11 @@ def download_audio(video_id: str, work_dir: Path, emit=print) -> None:
             "output.%(ext)s",
             watch_url,
         ],
+        emit,
         cwd=work_dir,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        env=downloader_env(),
     )
-    assert process.stdout is not None
-    for line in process.stdout:
-        log_line(line.rstrip("\n"), emit)
-
-    if process.wait() != 0:
-        raise RuntimeError("YouTube download failed.")
+    if code != 0:
+        raise RuntimeError(last_yt_dlp_error(lines))
 
 
 def find_thumbnail(work_dir: Path) -> Path | None:
@@ -113,24 +185,19 @@ def ensure_thumbnail(watch_url: str, work_dir: Path, emit=print) -> None:
         return
 
     log_line("Fetching album artwork...", emit)
-    process = subprocess.run(
+    code, _ = run_yt_dlp(
         [
-            "youtube-dl",
             "--write-thumbnail",
             "--skip-download",
             "--output",
             "output.%(ext)s",
             watch_url,
         ],
+        emit,
         cwd=work_dir,
-        capture_output=True,
-        text=True,
-        env=downloader_env(),
     )
-    if process.returncode != 0:
+    if code != 0:
         log_line("Warning: could not download album artwork.", emit)
-        if process.stderr:
-            log_line(process.stderr, emit)
 
 
 def track_metadata_args(
@@ -220,8 +287,13 @@ def download_song(
     emit=print,
 ) -> Path:
     """Download a single YouTube video as one tagged MP3 file."""
+    output_dir = resolve_output_dir(output_dir)
     video_id = parse_video_id(video_input)
-    output_dir.mkdir(parents=True, exist_ok=True)
+
+    try:
+        output_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise RuntimeError(f"Cannot write to output folder: {exc}") from exc
 
     log_line(f"YT video: {video_id}...", emit)
     log_line(f"Saving song to {output_dir}", emit)
@@ -234,9 +306,10 @@ def download_song(
     )
 
     output_template = str(output_dir / "%(title)s.%(ext)s")
-    process = subprocess.Popen(
+    started_at = time.time()
+
+    attempts = [
         [
-            "youtube-dl",
             "--no-playlist",
             "--extract-audio",
             "--audio-format",
@@ -247,18 +320,48 @@ def download_song(
             output_template,
             watch_url,
         ],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        env=downloader_env(),
-    )
-    assert process.stdout is not None
-    for line in process.stdout:
-        log_line(line.rstrip("\n"), emit)
+        [
+            "--no-playlist",
+            "--extract-audio",
+            "--audio-format",
+            "mp3",
+            "--embed-metadata",
+            "--output",
+            output_template,
+            watch_url,
+        ],
+        [
+            "--no-playlist",
+            "-x",
+            "--audio-format",
+            "mp3",
+            "--output",
+            output_template,
+            watch_url,
+        ],
+    ]
 
-    if process.wait() != 0:
-        raise RuntimeError("Song download failed.")
+    code = 1
+    lines: list[str] = []
+    for index, args in enumerate(attempts):
+        if index > 0:
+            log_line("Retrying song download with simpler settings...", emit)
+        code, lines = run_yt_dlp(args, emit)
+        if code == 0:
+            break
+    if code != 0:
+        saved = newest_mp3(output_dir, since=started_at)
+        if saved:
+            log_line(
+                f"Warning: post-processing reported an error, but saved: {saved.name}",
+                emit,
+            )
+            return output_dir
+        raise RuntimeError(last_yt_dlp_error(lines))
 
+    saved = newest_mp3(output_dir, since=started_at)
+    if saved:
+        log_line(f"Saved: {saved.name}", emit)
     return output_dir
 
 
@@ -299,7 +402,9 @@ def split_tracks(
         or ""
     )
     output_dir = (
-        output_parent / album if output_parent is not None else Path(album)
+        resolve_output_dir(output_parent) / album
+        if output_parent is not None
+        else Path(album)
     )
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -386,7 +491,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
-    output_parent = Path(args.directory) if args.directory else None
+    output_parent = resolve_output_dir(args.directory) if args.directory else None
     try:
         if args.mode == "song":
             if output_parent is None:

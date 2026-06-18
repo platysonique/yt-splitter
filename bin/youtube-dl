@@ -1,10 +1,5 @@
 #!/usr/bin/env bash
-# yt-splitter calls youtube-dl; prefer pipx/global yt-dlp, fall back to project venv.
+# yt-splitter calls youtube-dl; always use the project venv's yt-dlp.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-
-if command -v yt-dlp >/dev/null 2>&1 && yt-dlp --version >/dev/null 2>&1; then
-  exec yt-dlp "$@"
-fi
-
 exec "$ROOT/.venv/bin/yt-dlp" "$@"

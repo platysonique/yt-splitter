@@ -16,6 +16,14 @@ fi
 
 export PATH="$ROOT/bin:${PATH}"
 
+# Detached GUI may not inherit nvm/node from the shell; find it explicitly.
+if [[ -d "${HOME}/.nvm/versions/node" ]]; then
+  NVM_NODE_BIN="$(find "${HOME}/.nvm/versions/node" -maxdepth 2 -type d -name bin | sort -V | tail -1)"
+  if [[ -n "${NVM_NODE_BIN}" ]]; then
+    export PATH="${NVM_NODE_BIN}:${PATH}"
+  fi
+fi
+
 if [[ $# -eq 0 ]]; then
   setsid "$ROOT/.venv/bin/python" -m gui.app </dev/null >/dev/null 2>&1 &
   exit 0

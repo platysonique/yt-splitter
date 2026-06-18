@@ -280,7 +280,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Missing folder", "Choose where to save the files.")
             return
 
-        output_path = Path(output_dir)
+        output_path = Path(output_dir).expanduser()
         try:
             output_path.mkdir(parents=True, exist_ok=True)
         except OSError as exc:
