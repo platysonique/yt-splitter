@@ -17,7 +17,8 @@ fi
 export PATH="$ROOT/bin:${PATH}"
 
 if [[ $# -eq 0 ]]; then
-  exec .venv/bin/python -m gui.app
+  setsid "$ROOT/.venv/bin/python" -m gui.app </dev/null >/dev/null 2>&1 &
+  exit 0
 fi
 
 exec .venv/bin/python splitter.py "$@"

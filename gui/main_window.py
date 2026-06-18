@@ -21,6 +21,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from gui.settings import get_output_dir, set_output_dir
 from gui.worker import SplitWorker
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -139,7 +140,7 @@ class MainWindow(QMainWindow):
 
         out_label = QLabel("Save tracks to")
         out_row = QHBoxLayout()
-        self._output_input = QLineEdit(str(Path.home() / "Downloads"))
+        self._output_input = QLineEdit(get_output_dir())
         browse_btn = QPushButton("Browse…")
         browse_btn.setObjectName("secondary")
         browse_btn.clicked.connect(self._pick_output_dir)
@@ -188,6 +189,10 @@ class MainWindow(QMainWindow):
         )
         if chosen:
             self._output_input.setText(chosen)
+            set_output_dir(chosen)
+
+    def _persist_output_dir(self) -> None:
+        set_output_dir(self._output_input.text())
 
     def _append_log(self, text: str) -> None:
         self._log.append(text)
@@ -220,6 +225,8 @@ class MainWindow(QMainWindow):
         except OSError as exc:
             QMessageBox.critical(self, "Output folder", str(exc))
             return
+
+        self._persist_output_dir()
 
         self._log.clear()
         self._append_log(f"Starting split for: {video}")
@@ -276,4 +283,5 @@ class MainWindow(QMainWindow):
         if self._worker and self._worker.isRunning():
             self._worker.stop()
             self._worker.wait(3000)
+        self._persist_output_dir()
         super().closeEvent(event)
