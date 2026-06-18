@@ -66,7 +66,10 @@ def log_line(message: str, emit=print) -> None:
 
 def download_audio(video_id: str, work_dir: Path, emit=print) -> None:
     mp3_path = work_dir / "output.mp3"
+    watch_url = f"https://www.youtube.com/watch?v={video_id}"
+
     if mp3_path.exists():
+        ensure_thumbnail(watch_url, work_dir, emit=emit)
         return
 
     log_line("Downloading and converting audio file from YouTube...", emit)
@@ -75,12 +78,13 @@ def download_audio(video_id: str, work_dir: Path, emit=print) -> None:
             "youtube-dl",
             "--write-info-json",
             "--write-thumbnail",
+            "--embed-metadata",
             "--extract-audio",
             "--audio-format",
             "mp3",
             "--output",
             "output.%(ext)s",
-            f"https://www.youtube.com/watch?v={video_id}",
+            watch_url,
         ],
         cwd=work_dir,
         stdout=subprocess.PIPE,
@@ -94,6 +98,168 @@ def download_audio(video_id: str, work_dir: Path, emit=print) -> None:
 
     if process.wait() != 0:
         raise RuntimeError("YouTube download failed.")
+
+
+def find_thumbnail(work_dir: Path) -> Path | None:
+    for ext in ("webp", "jpg", "jpeg", "png"):
+        path = work_dir / f"output.{ext}"
+        if path.is_file():
+            return path
+    return None
+
+
+def ensure_thumbnail(watch_url: str, work_dir: Path, emit=print) -> None:
+    if find_thumbnail(work_dir):
+        return
+
+    log_line("Fetching album artwork...", emit)
+    process = subprocess.run(
+        [
+            "youtube-dl",
+            "--write-thumbnail",
+            "--skip-download",
+            "--output",
+            "output.%(ext)s",
+            watch_url,
+        ],
+        cwd=work_dir,
+        capture_output=True,
+        text=True,
+        env=downloader_env(),
+    )
+    if process.returncode != 0:
+        log_line("Warning: could not download album artwork.", emit)
+        if process.stderr:
+            log_line(process.stderr, emit)
+
+
+def track_metadata_args(
+    data: dict,
+    *,
+    title: str,
+    album: str,
+    artist: str,
+    track_label: str,
+) -> list[str]:
+    args: list[str] = [
+        "-metadata",
+        f"title={title}",
+        "-metadata",
+        f"album={album}",
+        "-metadata",
+        f"artist={artist}",
+        "-metadata",
+        f"track={track_label}",
+    ]
+    if artist:
+        args.extend(["-metadata", f"album_artist={artist}"])
+
+    upload_date = data.get("upload_date") or data.get("release_date") or ""
+    if upload_date:
+        date_str = str(upload_date)
+        if len(date_str) >= 4:
+            args.extend(["-metadata", f"date={date_str[:4]}"])
+
+    genre = data.get("genre")
+    if isinstance(genre, str) and genre.strip():
+        args.extend(["-metadata", f"genre={genre.strip()}"])
+
+    return args
+
+
+def split_chapter_to_mp3(
+    mp3_path: Path,
+    thumbnail_path: Path | None,
+    output_file: Path,
+    *,
+    start: int,
+    end: int,
+    metadata_args: list[str],
+) -> subprocess.CompletedProcess[str]:
+    command = [
+        "ffmpeg",
+        "-ss",
+        render_duration(start),
+        "-to",
+        render_duration(end),
+        "-i",
+        str(mp3_path),
+    ]
+    if thumbnail_path is not None:
+        command.extend(
+            [
+                "-i",
+                str(thumbnail_path),
+                "-map",
+                "0:a:0",
+                "-map",
+                "1:0",
+                "-c:a",
+                "copy",
+                "-id3v2_version",
+                "3",
+                "-metadata:s:v",
+                "title=Album cover",
+                "-metadata:s:v",
+                "comment=Cover (front)",
+                "-disposition:v:0",
+                "attached_pic",
+            ]
+        )
+    else:
+        command.extend(["-vn", "-acodec", "copy"])
+
+    command.extend(metadata_args)
+    command.extend(["-y", f"file:{output_file}"])
+    return subprocess.run(command, capture_output=True, text=True)
+
+
+def download_song(
+    video_input: str,
+    output_dir: Path,
+    emit=print,
+) -> Path:
+    """Download a single YouTube video as one tagged MP3 file."""
+    video_id = parse_video_id(video_input)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    log_line(f"YT video: {video_id}...", emit)
+    log_line(f"Saving song to {output_dir}", emit)
+    log_line("Downloading song as MP3...", emit)
+
+    watch_url = (
+        video_input.strip()
+        if video_input.strip().startswith(("http://", "https://"))
+        else f"https://www.youtube.com/watch?v={video_id}"
+    )
+
+    output_template = str(output_dir / "%(title)s.%(ext)s")
+    process = subprocess.Popen(
+        [
+            "youtube-dl",
+            "--no-playlist",
+            "--extract-audio",
+            "--audio-format",
+            "mp3",
+            "--embed-metadata",
+            "--embed-thumbnail",
+            "--output",
+            output_template,
+            watch_url,
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        env=downloader_env(),
+    )
+    assert process.stdout is not None
+    for line in process.stdout:
+        log_line(line.rstrip("\n"), emit)
+
+    if process.wait() != 0:
+        raise RuntimeError("Song download failed.")
+
+    return output_dir
 
 
 def split_tracks(
@@ -125,11 +291,23 @@ def split_tracks(
         )
 
     album = strip_unsafe(data["title"])
-    artist = data.get("artist") or data.get("uploader") or ""
+    artist = (
+        data.get("artist")
+        or data.get("album_artist")
+        or data.get("uploader")
+        or data.get("channel")
+        or ""
+    )
     output_dir = (
         output_parent / album if output_parent is not None else Path(album)
     )
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    thumbnail_path = find_thumbnail(work_dir)
+    if thumbnail_path:
+        log_line(f"Embedding album art from {thumbnail_path.name}", emit)
+    else:
+        log_line("Warning: no album artwork found; tracks will have tags only.", emit)
 
     log_line(f"Tracks will be saved to {output_dir}", emit)
     log_line("Splitting mp3 file...", emit)
@@ -159,31 +337,20 @@ def split_tracks(
 
         log_line(f"[splitting] {log_label}...", emit)
 
-        result = subprocess.run(
-            [
-                "ffmpeg",
-                "-i",
-                str(mp3_path),
-                "-vn",
-                "-acodec",
-                "copy",
-                "-ss",
-                render_duration(round(chapter["start_time"])),
-                "-to",
-                render_duration(round(chapter["end_time"])),
-                "-metadata",
-                f"title={safe_title}",
-                "-metadata",
-                f"album={album}",
-                "-metadata",
-                f"artist={artist}",
-                "-metadata",
-                f"track={prefix}/{total_label}",
-                "-y",
-                f"file:{output_file}",
-            ],
-            capture_output=True,
-            text=True,
+        metadata_args = track_metadata_args(
+            data,
+            title=safe_title,
+            album=album,
+            artist=artist,
+            track_label=f"{prefix}/{total_label}",
+        )
+        result = split_chapter_to_mp3(
+            mp3_path,
+            thumbnail_path,
+            output_file,
+            start=round(chapter["start_time"]),
+            end=round(chapter["end_time"]),
+            metadata_args=metadata_args,
         )
         if result.returncode != 0:
             log_line("Error while converting mp3 file:", emit)
@@ -198,28 +365,39 @@ def split_tracks(
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Download and split a YouTube video into chapter MP3 tracks."
+        description="Download YouTube audio as album chapters or a single song."
     )
     parser.add_argument("video", help="YouTube URL or video ID")
     parser.add_argument(
         "directory",
         nargs="?",
-        help="Parent folder where the album subfolder will be created",
+        help="Output folder (album parent dir or song save dir)",
+    )
+    parser.add_argument(
+        "--mode",
+        choices=("album", "song"),
+        default="album",
+        help="Album splits chaptered videos; song downloads one MP3 file",
     )
     parser.add_argument(
         "--track-prefix",
         action="store_true",
-        help="Prefix exported filenames with zero-padded track numbers",
+        help="Prefix exported album filenames with zero-padded track numbers",
     )
     args = parser.parse_args(argv)
 
     output_parent = Path(args.directory) if args.directory else None
     try:
-        split_tracks(
-            args.video,
-            output_parent,
-            use_track_prefix=args.track_prefix,
-        )
+        if args.mode == "song":
+            if output_parent is None:
+                raise ValueError("Song mode requires an output directory.")
+            download_song(args.video, output_parent)
+        else:
+            split_tracks(
+                args.video,
+                output_parent,
+                use_track_prefix=args.track_prefix,
+            )
     except (ValueError, RuntimeError) as exc:
         print(str(exc), file=sys.stderr)
         return 1

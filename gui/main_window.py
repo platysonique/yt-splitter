@@ -4,9 +4,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QFont
 from PyQt6.QtWidgets import (
+    QButtonGroup,
     QCheckBox,
     QFileDialog,
     QHBoxLayout,
@@ -16,12 +16,18 @@ from PyQt6.QtWidgets import (
     QMessageBox,
     QProgressBar,
     QPushButton,
+    QRadioButton,
     QTextEdit,
     QVBoxLayout,
     QWidget,
 )
 
-from gui.settings import get_output_dir, set_output_dir
+from gui.settings import (
+    get_download_mode,
+    get_output_dir_for_mode,
+    set_download_mode,
+    set_output_dir_for_mode,
+)
 from gui.worker import SplitWorker
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -82,17 +88,20 @@ QProgressBar::chunk {
 QLabel#subtitle {
     color: #aaaaaa;
 }
-QCheckBox {
+QCheckBox, QRadioButton {
     spacing: 8px;
 }
-QCheckBox::indicator {
+QCheckBox::indicator, QRadioButton::indicator {
     width: 16px;
     height: 16px;
     border: 1px solid #3d3d3d;
     border-radius: 4px;
     background-color: #2b2b2b;
 }
-QCheckBox::indicator:checked {
+QRadioButton::indicator {
+    border-radius: 8px;
+}
+QCheckBox::indicator:checked, QRadioButton::indicator:checked {
     background-color: #3d7eff;
     border-color: #3d7eff;
 }
@@ -107,7 +116,9 @@ class MainWindow(QMainWindow):
         self.setStyleSheet(STYLESHEET)
 
         self._worker: SplitWorker | None = None
+        self._current_mode = get_download_mode()
         self._build_ui()
+        self._apply_mode(self._current_mode, persist=False)
 
     def _build_ui(self) -> None:
         central = QWidget()
@@ -122,14 +133,26 @@ class MainWindow(QMainWindow):
         title_font.setBold(True)
         title.setFont(title_font)
 
-        subtitle = QLabel(
-            "Download a YouTube video with chapters and split it into tagged MP3 tracks."
-        )
-        subtitle.setObjectName("subtitle")
-        subtitle.setWordWrap(True)
+        self._subtitle = QLabel()
+        self._subtitle.setObjectName("subtitle")
+        self._subtitle.setWordWrap(True)
 
         layout.addWidget(title)
-        layout.addWidget(subtitle)
+        layout.addWidget(self._subtitle)
+
+        mode_row = QHBoxLayout()
+        mode_label = QLabel("Download type")
+        self._album_radio = QRadioButton("Album")
+        self._song_radio = QRadioButton("Song")
+        self._mode_group = QButtonGroup(self)
+        self._mode_group.addButton(self._album_radio, 0)
+        self._mode_group.addButton(self._song_radio, 1)
+        self._mode_group.buttonClicked.connect(self._on_mode_changed)
+        mode_row.addWidget(mode_label)
+        mode_row.addWidget(self._album_radio)
+        mode_row.addWidget(self._song_radio)
+        mode_row.addStretch()
+        layout.addLayout(mode_row)
 
         url_label = QLabel("YouTube URL or video ID")
         self._url_input = QLineEdit()
@@ -138,16 +161,16 @@ class MainWindow(QMainWindow):
         layout.addWidget(url_label)
         layout.addWidget(self._url_input)
 
-        out_label = QLabel("Save tracks to")
+        self._out_label = QLabel("Save tracks to")
         out_row = QHBoxLayout()
-        self._output_input = QLineEdit(get_output_dir())
+        self._output_input = QLineEdit()
         browse_btn = QPushButton("Browse…")
         browse_btn.setObjectName("secondary")
         browse_btn.clicked.connect(self._pick_output_dir)
         out_row.addWidget(self._output_input)
         out_row.addWidget(browse_btn)
 
-        layout.addWidget(out_label)
+        layout.addWidget(self._out_label)
         layout.addLayout(out_row)
 
         self._track_prefix = QCheckBox("Track Prefix")
@@ -157,13 +180,13 @@ class MainWindow(QMainWindow):
         layout.addWidget(self._track_prefix)
 
         action_row = QHBoxLayout()
-        self._split_btn = QPushButton("Split Album")
-        self._split_btn.clicked.connect(self._start_split)
+        self._action_btn = QPushButton("Split Album")
+        self._action_btn.clicked.connect(self._start_download)
         self._cancel_btn = QPushButton("Cancel")
         self._cancel_btn.setObjectName("secondary")
         self._cancel_btn.setEnabled(False)
-        self._cancel_btn.clicked.connect(self._cancel_split)
-        action_row.addWidget(self._split_btn)
+        self._cancel_btn.clicked.connect(self._cancel_download)
+        action_row.addWidget(self._action_btn)
         action_row.addWidget(self._cancel_btn)
         action_row.addStretch()
         layout.addLayout(action_row)
@@ -181,6 +204,41 @@ class MainWindow(QMainWindow):
         self._log.setPlaceholderText("Progress output will appear here…")
         layout.addWidget(self._log, stretch=1)
 
+    def _mode_from_ui(self) -> str:
+        return "song" if self._song_radio.isChecked() else "album"
+
+    def _on_mode_changed(self) -> None:
+        new_mode = self._mode_from_ui()
+        if new_mode == self._current_mode:
+            return
+
+        self._persist_output_dir()
+        self._apply_mode(new_mode, persist=True)
+
+    def _apply_mode(self, mode: str, *, persist: bool) -> None:
+        self._current_mode = mode
+        if persist:
+            set_download_mode(mode)
+
+        if mode == "song":
+            self._song_radio.setChecked(True)
+            self._subtitle.setText(
+                "Download a single YouTube video as one tagged MP3 file."
+            )
+            self._out_label.setText("Save song to")
+            self._action_btn.setText("Download Song")
+            self._track_prefix.setVisible(False)
+        else:
+            self._album_radio.setChecked(True)
+            self._subtitle.setText(
+                "Download a YouTube video with chapters and split it into tagged MP3 tracks."
+            )
+            self._out_label.setText("Save album to")
+            self._action_btn.setText("Split Album")
+            self._track_prefix.setVisible(True)
+
+        self._output_input.setText(get_output_dir_for_mode(mode))
+
     def _pick_output_dir(self) -> None:
         chosen = QFileDialog.getExistingDirectory(
             self,
@@ -189,10 +247,10 @@ class MainWindow(QMainWindow):
         )
         if chosen:
             self._output_input.setText(chosen)
-            set_output_dir(chosen)
+            set_output_dir_for_mode(self._current_mode, chosen)
 
     def _persist_output_dir(self) -> None:
-        set_output_dir(self._output_input.text())
+        set_output_dir_for_mode(self._current_mode, self._output_input.text())
 
     def _append_log(self, text: str) -> None:
         self._log.append(text)
@@ -201,22 +259,25 @@ class MainWindow(QMainWindow):
         )
 
     def _set_busy(self, busy: bool) -> None:
-        self._split_btn.setEnabled(not busy)
+        self._action_btn.setEnabled(not busy)
         self._cancel_btn.setEnabled(busy)
         self._url_input.setEnabled(not busy)
         self._output_input.setEnabled(not busy)
         self._track_prefix.setEnabled(not busy)
+        self._album_radio.setEnabled(not busy)
+        self._song_radio.setEnabled(not busy)
         self._progress.setVisible(busy)
 
-    def _start_split(self) -> None:
+    def _start_download(self) -> None:
         video = self._url_input.text().strip()
         output_dir = self._output_input.text().strip()
+        mode = self._current_mode
 
         if not video:
             QMessageBox.warning(self, "Missing URL", "Paste a YouTube URL or video ID.")
             return
         if not output_dir:
-            QMessageBox.warning(self, "Missing folder", "Choose where to save the tracks.")
+            QMessageBox.warning(self, "Missing folder", "Choose where to save the files.")
             return
 
         output_path = Path(output_dir)
@@ -229,9 +290,10 @@ class MainWindow(QMainWindow):
         self._persist_output_dir()
 
         self._log.clear()
-        self._append_log(f"Starting split for: {video}")
-        self._append_log(f"Output parent folder: {output_path}")
-        if self._track_prefix.isChecked():
+        action = "song download" if mode == "song" else "album split"
+        self._append_log(f"Starting {action} for: {video}")
+        self._append_log(f"Output folder: {output_path}")
+        if mode == "album" and self._track_prefix.isChecked():
             self._append_log("Track prefix: enabled")
         self._status.setText("Working…")
         self._set_busy(True)
@@ -240,6 +302,7 @@ class MainWindow(QMainWindow):
             video,
             str(output_path),
             BIN_DIR,
+            mode=mode,
             use_track_prefix=self._track_prefix.isChecked(),
             parent=self,
         )
@@ -249,7 +312,7 @@ class MainWindow(QMainWindow):
         self._worker.finished.connect(self._on_worker_finished)
         self._worker.start()
 
-    def _cancel_split(self) -> None:
+    def _cancel_download(self) -> None:
         if self._worker:
             self._append_log("Cancelling…")
             self._worker.stop()
@@ -257,23 +320,29 @@ class MainWindow(QMainWindow):
     def _on_success(self, output_dir: str) -> None:
         self._status.setText("Done.")
         self._append_log("")
-        self._append_log(f"Tracks saved under: {output_dir}")
-        QMessageBox.information(
-            self,
-            "Split complete",
-            f"Tracks were saved under:\n{output_dir}\n\n"
-            "Look for a subfolder named after the video title.",
-        )
+        self._append_log(f"Files saved under: {output_dir}")
+        if self._current_mode == "song":
+            QMessageBox.information(
+                self,
+                "Download complete",
+                f"Song saved to:\n{output_dir}",
+            )
+        else:
+            QMessageBox.information(
+                self,
+                "Split complete",
+                f"Tracks were saved under:\n{output_dir}\n\n"
+                "Look for a subfolder named after the video title.",
+            )
 
     def _on_failure(self, message: str) -> None:
         self._status.setText("Failed.")
         self._append_log(f"ERROR: {message}")
-        QMessageBox.critical(
-            self,
-            "Split failed",
-            message
-            + "\n\nTip: the video must have YouTube chapters (common on full-album uploads).",
-        )
+        if self._current_mode == "song":
+            tip = "Check the URL and try again."
+        else:
+            tip = "Tip: the video must have YouTube chapters (common on full-album uploads)."
+        QMessageBox.critical(self, "Failed", f"{message}\n\n{tip}")
 
     def _on_worker_finished(self) -> None:
         self._set_busy(False)
@@ -284,4 +353,5 @@ class MainWindow(QMainWindow):
             self._worker.stop()
             self._worker.wait(3000)
         self._persist_output_dir()
+        set_download_mode(self._current_mode)
         super().closeEvent(event)
