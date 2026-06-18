@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# ytsplit — launch GUI or run yt-splitter CLI
+set -euo pipefail
+
+SCRIPT="$(readlink -f "${BASH_SOURCE[0]}")"
+ROOT="$(cd "$(dirname "$SCRIPT")" && pwd)"
+cd "$ROOT"
+
+chmod +x bin/youtube-dl 2>/dev/null || true
+
+if [[ ! -d .venv ]]; then
+  python3 -m venv .venv
+  .venv/bin/pip install --upgrade pip
+  .venv/bin/pip install -r requirements-gui.txt
+fi
+
+export PATH="$ROOT/bin:${PATH}"
+
+if [[ $# -eq 0 ]]; then
+  exec .venv/bin/python -m gui.app
+fi
+
+exec .venv/bin/python splitter.py "$@"

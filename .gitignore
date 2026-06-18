@@ -7,3 +7,12 @@ build/
 
 # Directory created by dartdoc
 doc/api/
+
+# Python GUI / splitter
+.venv/
+__pycache__/
+*.py[cod]
+gui/__pycache__/
+
+# Downloaded binary (fetch from releases during install)
+bin/yt-splitter

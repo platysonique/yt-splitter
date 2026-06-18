@@ -121,7 +121,11 @@ void main(List<String> arguments) async {
 
     tracknumber++;
 
-    print('[splitting] $chapterTitle...');
+    final totalTracks = data['chapters'].length;
+    final prefix = trackPrefix(tracknumber, totalTracks);
+    final totalLabel = trackPrefix(totalTracks, totalTracks);
+
+    print('[splitting] $prefix - $chapterTitle...');
 
     final startString = renderDuration(chapter['start_time'].round());
     final endString = renderDuration(chapter['end_time'].round());
@@ -161,9 +165,9 @@ void main(List<String> arguments) async {
       '-metadata',
       'artist=$artist',
       '-metadata',
-      'track=$tracknumber',
+      'track=$prefix/$totalLabel',
       '-y',
-      'file:' + join(outputDirectoryPath, '$chapterTitle.mp3'),
+      'file:' + join(outputDirectoryPath, '$prefix - $chapterTitle.mp3'),
     ]);
     if (res.exitCode != 0) {
       print('Error while converting mp3 file:');
@@ -186,6 +190,11 @@ String renderDuration(int x) {
     str = '${(x / 3600).floor()}:$str';
   }
   return str;
+}
+
+String trackPrefix(int number, int total) {
+  final width = total.toString().length < 2 ? 2 : total.toString().length;
+  return number.toString().padLeft(width, '0');
 }
 
 String stripUnsafeCharacters(String text) {
